@@ -2090,7 +2090,6 @@ class _ProxyHttpServer {
   Uri addUriAudioSource(UriAudioSource source) {
     final uri = source.uri;
     final headers = <String, String>{};
-    final refreshCredentials = source.refreshCredentials;
     final onError = source.onError;
     final getAuthHeaders = source.getAuthHeaders;
     if (source.headers != null) {
@@ -2101,7 +2100,6 @@ class _ProxyHttpServer {
       uri,
       headers: headers,
       userAgent: source._player?._userAgent,
-      refreshCredentials: refreshCredentials,
       onError: onError,
       getAuthHeaders: getAuthHeaders,
     );
@@ -2219,15 +2217,10 @@ abstract class AudioSource {
   final String _id;
   AudioPlayer? _player;
 
-  /// If a request needs authorization headers, logically it needs to refresh credentials.
-  /// In case of giving a playlist with lazy load, the player freezes if there is no
-  /// inbuilt refresh tokens mechanism
-  final Future<void> Function()? refreshCredentials;
-
   final void Function(String message)? onError;
 
   /// getter function for additional headers to auth
-  final Map<String, String> Function()? getAuthHeaders;
+  final Future<Map<String, String>> Function()? getAuthHeaders;
 
   /// Creates an [AudioSource] from a [Uri] with optional headers by
   /// attempting to guess the type of stream. On iOS, this uses Apple's SDK to
@@ -2255,9 +2248,8 @@ abstract class AudioSource {
     Uri uri, {
     Map<String, String>? headers,
     dynamic tag,
-    Future<void> Function()? refreshCredentials,
     void Function(String message)? onError,
-    Map<String, String> Function()? getAuthHeaders,
+    Future<Map<String, String>> Function()? getAuthHeaders,
   }) {
     bool hasExtension(Uri uri, String extension) =>
         uri.path.toLowerCase().endsWith('.$extension') ||
@@ -2271,7 +2263,6 @@ abstract class AudioSource {
         uri,
         headers: headers,
         tag: tag,
-        refreshCredentials: refreshCredentials,
         onError: onError,
         getAuthHeaders: getAuthHeaders,
       );
@@ -2306,7 +2297,7 @@ abstract class AudioSource {
     return AudioSource.uri(Uri.parse('asset:///$keyName'), tag: tag);
   }
 
-  AudioSource({this.refreshCredentials, this.onError, this.getAuthHeaders})
+  AudioSource({this.onError, this.getAuthHeaders})
       : _id = _uuid.v4();
 
   @mustCallSuper
@@ -2349,7 +2340,6 @@ abstract class IndexedAudioSource extends AudioSource {
   IndexedAudioSource(
       {this.tag,
       this.duration,
-      super.refreshCredentials,
       super.onError,
       super.getAuthHeaders});
 
@@ -2374,7 +2364,6 @@ abstract class UriAudioSource extends IndexedAudioSource {
     this.headers,
     dynamic tag,
     Duration? duration,
-    super.refreshCredentials,
     super.onError,
     super.getAuthHeaders,
   }) : super(tag: tag, duration: duration);
@@ -2477,7 +2466,6 @@ class ProgressiveAudioSource extends UriAudioSource {
     super.tag,
     super.duration,
     this.options,
-    super.refreshCredentials,
     super.onError,
     super.getAuthHeaders,
   });
@@ -2589,7 +2577,6 @@ class ConcatenatingAudioSource extends AudioSource {
     required this.children,
     this.useLazyPreparation = true,
     ShuffleOrder? shuffleOrder,
-    super.refreshCredentials,
     super.getAuthHeaders,
   }) : _shuffleOrder = shuffleOrder ?? DefaultShuffleOrder()
           ..insert(0, children.length);
@@ -3381,9 +3368,8 @@ _ProxyHandler _proxyHandlerForSource(StreamAudioSource source) {
 _ProxyHandler _proxyHandlerForUri(Uri uri,
     {Map<String, String>? headers,
     String? userAgent,
-    Future<void> Function()? refreshCredentials,
     void Function(String message)? onError,
-    Map<String, String> Function()? getAuthHeaders,}) {
+    Future<Map<String, String>> Function()? getAuthHeaders,}) {
   // Keep redirected [Uri] to speed-up requests
   Uri? redirectedUri;
   Future<void> handler(_ProxyHttpServer server, HttpRequest request) async {
@@ -3397,7 +3383,7 @@ _ProxyHandler _proxyHandlerForUri(Uri uri,
       // write supplied headers last (to ensure supplied headers aren't overwritten)
       headers?.forEach((name, value) => requestHeaders[name] = value);
       if (getAuthHeaders != null) {
-        final authHeaders = getAuthHeaders();
+        final authHeaders = await getAuthHeaders();
         authHeaders.forEach((name, value) => requestHeaders[name] = value);
       }
       var originRequest =
@@ -3407,11 +3393,9 @@ _ProxyHandler _proxyHandlerForUri(Uri uri,
       if (originResponse.redirects.isNotEmpty) {
         redirectedUri = originResponse.redirects.last.location;
       }
-      if (refreshCredentials != null &&
-          originResponse.statusCode == HttpStatus.unauthorized) {
-        await refreshCredentials();
+      if (originResponse.statusCode == HttpStatus.unauthorized) {
         if (getAuthHeaders != null) {
-          final authHeaders = getAuthHeaders();
+          final authHeaders = await getAuthHeaders();
           authHeaders.forEach((name, value) => requestHeaders[name] = value);
         }
         originRequest = await _getUrl(client, redirectedUri ?? uri,
