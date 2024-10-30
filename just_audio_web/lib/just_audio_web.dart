@@ -120,8 +120,8 @@ class Html5AudioPlayer extends JustAudioPlayer {
         }.toJS);
     _audioElement.addEventListener(
         'error',
-        (Event event) {
-          _durationCompleter?.completeError(_audioElement.error!);
+        (Event event) async {
+          await _handleAudioElementError();
         }.toJS);
     _audioElement.addEventListener(
         'ended',
@@ -160,6 +160,73 @@ class Html5AudioPlayer extends JustAudioPlayer {
         (Event event) {
           broadcastPlaybackEvent();
         }.toJS);
+  }
+
+  Future<void> _handleAudioElementError() async {
+    final error = _audioElement.error;
+    if (error != null) {
+      if (await _isUnauthorizedError()) {
+        await _refreshAudioSourceUrl();
+      } else {
+        // Handle other errors or report them back to the Dart side
+        _durationCompleter?.completeError(error);
+      }
+    }
+  }
+
+  Future<bool> _isUnauthorizedError() async {
+    try {
+      final response = await http.head(Uri.parse(_audioElement.src!));
+      return response.statusCode == 401 ||
+          response.statusCode == 403 ||
+          _audioElement.error!.code == MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED;
+    } catch (e) {
+      // Handle exceptions, possibly network errors
+      return false;
+    }
+  }
+
+  Future<void> _refreshAudioSourceUrl() async {
+    if (_currentAudioSourcePlayer != null &&
+        _currentAudioSourcePlayer is UriAudioSourcePlayer &&
+        (_currentAudioSourcePlayer as UriAudioSourcePlayer).onUrlRefresh !=
+            null) {
+      try {
+        // Get the new URL
+        Uri newUri = await (_currentAudioSourcePlayer as UriAudioSourcePlayer)
+            .onUrlRefresh!();
+
+        // Update the audio element source
+        _audioElement.src = newUri.toString();
+
+        // Reload the audio element
+        _audioElement.load();
+
+        // Attempt to play again
+        await _audioElement.play().toDart;
+
+        // Reset the error state
+        _durationCompleter = null;
+
+        // Update the audio source player with the new URI
+        (_currentAudioSourcePlayer as UriAudioSourcePlayer).uri = newUri;
+
+        // Optionally, seek to the last known position
+        if (_playing) {
+          await _audioElement.play().toDart;
+        }
+      } catch (e) {
+        // Handle errors during URL refresh, possibly notify the user
+        _durationCompleter?.completeError(e);
+      }
+    } else {
+      // No onUrlRefresh provided; handle accordingly
+      _durationCompleter?.completeError(PlatformException(
+        code: 'error',
+        message:
+            'Unauthorized error and onUrlRefresh callback is not provided.',
+      ));
+    }
   }
 
   /// The current playback order, depending on whether shuffle mode is enabled.
@@ -522,7 +589,8 @@ class Html5AudioPlayer extends JustAudioPlayer {
   AudioSourcePlayer decodeAudioSource(AudioSourceMessage audioSourceMessage) {
     if (audioSourceMessage is ProgressiveAudioSourceMessage) {
       return ProgressiveAudioSourcePlayer(this, audioSourceMessage.id,
-          Uri.parse(audioSourceMessage.uri), audioSourceMessage.headers);
+          Uri.parse(audioSourceMessage.uri), audioSourceMessage.headers,
+          onUrlRefresh: audioSourceMessage.onUrlRefresh);
     } else if (audioSourceMessage is DashAudioSourceMessage) {
       return DashAudioSourcePlayer(this, audioSourceMessage.id,
           Uri.parse(audioSourceMessage.uri), audioSourceMessage.headers);
@@ -617,13 +685,16 @@ abstract class UriAudioSourcePlayer extends IndexedAudioSourcePlayer {
 
   /// The headers to include in the request (unsupported).
   final Map<String, String>? headers;
+
+  /// Callback to refresh the URL when the token expires.
+  final Future<Uri> Function()? onUrlRefresh;
   double? _resumePos;
   Duration? _duration;
   Completer<dynamic>? _completer;
   int? _initialPos;
 
-  UriAudioSourcePlayer(
-      Html5AudioPlayer html5AudioPlayer, String id, this.uri, this.headers)
+  UriAudioSourcePlayer(Html5AudioPlayer html5AudioPlayer, String id, this.uri,
+      this.headers, this.onUrlRefresh)
       : super(html5AudioPlayer, id);
 
   @override
@@ -710,9 +781,13 @@ abstract class UriAudioSourcePlayer extends IndexedAudioSourcePlayer {
 
 /// A player for a [ProgressiveAudioSourceMessage].
 class ProgressiveAudioSourcePlayer extends UriAudioSourcePlayer {
-  ProgressiveAudioSourcePlayer(Html5AudioPlayer html5AudioPlayer, String id,
-      Uri uri, Map<String, String>? headers)
-      : super(html5AudioPlayer, id, uri, headers);
+  ProgressiveAudioSourcePlayer(
+    Html5AudioPlayer html5AudioPlayer,
+    String id,
+    Uri uri,
+    Map<String, String>? headers, {
+    Future<Uri> Function()? onUrlRefresh,
+  }) : super(html5AudioPlayer, id, uri, headers);
 }
 
 /// A player for a [DashAudioSourceMessage].

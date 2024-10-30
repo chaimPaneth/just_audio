@@ -2219,7 +2219,10 @@ abstract class AudioSource {
 
   final void Function(String message)? onError;
 
-  /// getter function for additional headers to auth
+  /// Callback to refresh the URL when the token expires.
+  final Future<Uri> Function()? onUrlRefresh;
+
+  /// Getter function for additional headers to auth
   final Future<Map<String, String>> Function()? getAuthHeaders;
 
   /// Creates an [AudioSource] from a [Uri] with optional headers by
@@ -2250,6 +2253,7 @@ abstract class AudioSource {
     dynamic tag,
     void Function(String message)? onError,
     Future<Map<String, String>> Function()? getAuthHeaders,
+    Future<Uri> Function()? onUrlRefresh,
   }) {
     bool hasExtension(Uri uri, String extension) =>
         uri.path.toLowerCase().endsWith('.$extension') ||
@@ -2265,6 +2269,7 @@ abstract class AudioSource {
         tag: tag,
         onError: onError,
         getAuthHeaders: getAuthHeaders,
+        onUrlRefresh: onUrlRefresh
       );
     }
   }
@@ -2297,7 +2302,7 @@ abstract class AudioSource {
     return AudioSource.uri(Uri.parse('asset:///$keyName'), tag: tag);
   }
 
-  AudioSource({this.onError, this.getAuthHeaders})
+  AudioSource({this.onError, this.onUrlRefresh, this.getAuthHeaders})
       : _id = _uuid.v4();
 
   @mustCallSuper
@@ -2341,7 +2346,8 @@ abstract class IndexedAudioSource extends AudioSource {
       {this.tag,
       this.duration,
       super.onError,
-      super.getAuthHeaders});
+      super.getAuthHeaders,
+      super.onUrlRefresh});
 
   @override
   void _shuffle({int? initialIndex}) {}
@@ -2366,6 +2372,7 @@ abstract class UriAudioSource extends IndexedAudioSource {
     Duration? duration,
     super.onError,
     super.getAuthHeaders,
+    super.onUrlRefresh,
   }) : super(tag: tag, duration: duration);
 
   /// If [uri] points to an asset, this gives us [_overrideUri] which is the URI
@@ -2468,6 +2475,7 @@ class ProgressiveAudioSource extends UriAudioSource {
     this.options,
     super.onError,
     super.getAuthHeaders,
+    super.onUrlRefresh,
   });
 
   @override
@@ -2578,6 +2586,7 @@ class ConcatenatingAudioSource extends AudioSource {
     this.useLazyPreparation = true,
     ShuffleOrder? shuffleOrder,
     super.getAuthHeaders,
+    super.onUrlRefresh,
   }) : _shuffleOrder = shuffleOrder ?? DefaultShuffleOrder()
           ..insert(0, children.length);
 
