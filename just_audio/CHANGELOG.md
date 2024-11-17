@@ -1,3 +1,7 @@
+## 0.10.1
+
+* Fix conversion between milliBel and deciBel (@Chaphasilor).
+
 ## 0.9.42
 
 * Fix dealloc crash on iOS/macOS (@cristian1980).
