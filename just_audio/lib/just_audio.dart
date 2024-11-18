@@ -3463,7 +3463,7 @@ _ProxyHandler _proxyHandlerForUri(Uri uri,
         await for (var chunk in originResponse) {
           if (done) break;
           request.response.add(chunk);
-          await request.response.flush();
+          // await request.response.flush();
         }
       }
       await request.response.flush();
@@ -3476,43 +3476,46 @@ _ProxyHandler _proxyHandlerForUri(Uri uri,
       if (uri.scheme == 'http') {
         // Try parsing HTTP 0.9 response
         //request.response.headers.clear();
-        final socket = await Socket.connect(uri.host, uri.port);
-        final clientSocket =
-            await request.response.detachSocket(writeHeaders: false);
-        final done = Completer<dynamic>();
-        socket.listen(
-          clientSocket.add,
-          onDone: () async {
-            await clientSocket.flush();
-            socket.close();
-            clientSocket.close();
-            done.complete();
-          },
-        );
-        // Rewrite headers
-        final headers = <String, String?>{};
-        request.headers.forEach((name, value) {
-          if (name.toLowerCase() != HttpHeaders.hostHeader) {
-            headers[name] = value.join(",");
+        Socket? socket;
+        Socket? clientSocket;
+        try {
+          socket = await Socket.connect(uri.host, uri.port);
+          clientSocket =
+              await request.response.detachSocket(writeHeaders: false);
+          final done = Completer<dynamic>();
+          socket?.listen(
+            clientSocket.add,
+            onDone: () async {
+              await clientSocket?.flush();
+              socket?.close();
+              clientSocket?.close();
+              done.complete();
+            },
+          );
+          // Rewrite headers
+          final headers = <String, String?>{};
+          request.headers.forEach((name, value) {
+            if (name.toLowerCase() != HttpHeaders.hostHeader) {
+              headers[name] = value.join(",");
+            }
+          });
+          for (var name in headers.keys) {
+            headers[name] = headers[name];
           }
-        });
-        for (var name in headers.keys) {
-          headers[name] = headers[name];
+          socket?.write("GET ${uri.path} HTTP/1.1\n");
+          if (host != null) {
+            socket?.write("Host: $host\n");
+          }
+          for (var name in headers.keys) {
+            socket?.write("$name: ${headers[name]}\n");
+          }
+          socket?.write("\n");
+          await socket?.flush();
+          await done.future;
+        } finally {
+          socket?.close();
+          clientSocket?.close();
         }
-        socket.write("GET ${uri.path} HTTP/1.1\n");
-        if (host != null) {
-          socket.write("Host: $host\n");
-        }
-        for (var name in headers.keys) {
-          socket.write("$name: ${headers[name]}\n");
-        }
-        socket.write("\n");
-        await socket.flush();
-        await done.future;
-      }
-    } catch (e) {
-      if (onError != null) {
-        onError(e.toString());
       }
     }
   }
