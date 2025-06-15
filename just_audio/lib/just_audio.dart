@@ -2637,7 +2637,7 @@ abstract class AudioSource {
     return AudioSource.uri(Uri.parse('asset:///$keyName'), tag: tag);
   }
 
-  AudioSource({this.onError, this.onUrlRefresh, this.getAuthHeaders})
+  AudioSource({String? id, this.onError, this.onUrlRefresh, this.getAuthHeaders})
       : _id = _uuid.v4();
 
   @mustCallSuper
