@@ -2598,14 +2598,12 @@ abstract class AudioSource {
     } else if (hasExtension(uri, 'm3u8')) {
       return HlsAudioSource(uri, headers: headers, tag: tag);
     } else {
-      return ProgressiveAudioSource(
-        uri,
-        headers: headers,
-        tag: tag,
-        onError: onError,
-        getAuthHeaders: getAuthHeaders,
-        onUrlRefresh: onUrlRefresh
-      );
+      return ProgressiveAudioSource(uri,
+          headers: headers,
+          tag: tag,
+          onError: onError,
+          getAuthHeaders: getAuthHeaders,
+          onUrlRefresh: onUrlRefresh);
     }
   }
 
@@ -2637,7 +2635,8 @@ abstract class AudioSource {
     return AudioSource.uri(Uri.parse('asset:///$keyName'), tag: tag);
   }
 
-  AudioSource({String? id, this.onError, this.onUrlRefresh, this.getAuthHeaders})
+  AudioSource(
+      {String? id, this.onError, this.onUrlRefresh, this.getAuthHeaders})
       : _id = _uuid.v4();
 
   @mustCallSuper
@@ -3800,22 +3799,23 @@ _ProxyHandler _proxyHandlerForSource(StreamAudioSource source) {
 }
 
 /// A proxy handler for serving audio from a URI with optional headers.
-_ProxyHandler _proxyHandlerForUri(Uri uri,
-    {Map<String, String>? headers,
-    String? userAgent,
-    void Function(String message)? onError,
-    Future<Map<String, String>> Function()? getAuthHeaders,}) {
-  // Keep redirected [Uri] to speed-up requests
+_ProxyHandler _proxyHandlerForUri(
+  Uri uri, {
+  Map<String, String>? headers,
+  String? userAgent,
+  void Function(String message)? onError,
+  Future<Map<String, String>> Function()? getAuthHeaders,
+}) {
   Uri? redirectedUri;
+
   Future<void> handler(_ProxyHttpServer server, HttpRequest request) async {
     final client = _createHttpClient(userAgent: userAgent);
-    // Try to make normal request
     String? host;
+
     try {
       final requestHeaders = <String, String>{};
       request.headers
           .forEach((name, value) => requestHeaders[name] = value.join(', '));
-      // write supplied headers last (to ensure supplied headers aren't overwritten)
       headers?.forEach((name, value) => requestHeaders[name] = value);
       if (getAuthHeaders != null) {
         final authHeaders = await getAuthHeaders();
@@ -3850,12 +3850,9 @@ _ProxyHandler _proxyHandlerForUri(Uri uri,
       });
       request.response.statusCode = originResponse.statusCode;
 
-      // Send response
       if (headers != null && request.uri.path.toLowerCase().endsWith('.m3u8') ||
           ['application/x-mpegURL', 'application/vnd.apple.mpegurl']
               .contains(request.headers.value(HttpHeaders.contentTypeHeader))) {
-        // If this is an m3u8 file with headers, prepare the nested URIs.
-        // TODO: Handle other playlist formats similarly?
         final m3u8 = await originResponse.transform(utf8.decoder).join();
         for (var line in const LineSplitter().convert(m3u8)) {
           line = line.replaceAllMapped(
@@ -3865,10 +3862,8 @@ _ProxyHandler _proxyHandlerForUri(Uri uri,
           try {
             final rawNestedUri = Uri.parse(line);
             if (rawNestedUri.hasScheme) {
-              // Don't propagate headers
               server.addUriAudioSource(AudioSource.uri(rawNestedUri));
             } else {
-              // This is a resource on the same server, so propagate the headers.
               final basePath = rawNestedUri.path.startsWith('/')
                   ? ''
                   : uri.path.replaceAll(RegExp(r'/[^/]*$'), '/');
@@ -3877,32 +3872,22 @@ _ProxyHandler _proxyHandlerForUri(Uri uri,
               server.addUriAudioSource(
                   AudioSource.uri(nestedUri, headers: headers));
             }
-          } catch (e) {
+          } catch (_) {
             // ignore malformed lines
           }
         }
         request.response.add(utf8.encode(m3u8));
       } else {
-        request.response.bufferOutput = false;
-        var done = false;
-        request.response.done.then((dynamic _) => done = true);
-        await for (var chunk in originResponse) {
-          if (done) break;
-          request.response.add(chunk);
-          await request.response.flush();
-        }
+        await originResponse.pipe(request.response);
+        await request.response.close();
       }
-      await request.response.flush();
-      await request.response.close();
     } on HttpException {
-      // We likely are dealing with a streaming protocol
       if (uri.scheme == 'http') {
-        // Try parsing HTTP 0.9 response
-        //request.response.headers.clear();
         final socket = await Socket.connect(uri.host, uri.port);
         final clientSocket =
             await request.response.detachSocket(writeHeaders: false);
         final done = Completer<dynamic>();
+
         socket.listen(
           clientSocket.add,
           onDone: () async {
@@ -3912,16 +3897,14 @@ _ProxyHandler _proxyHandlerForUri(Uri uri,
             done.complete();
           },
         );
-        // Rewrite headers
+
         final headers = <String, String?>{};
         request.headers.forEach((name, value) {
           if (name.toLowerCase() != HttpHeaders.hostHeader) {
             headers[name] = value.join(",");
           }
         });
-        for (var name in headers.keys) {
-          headers[name] = headers[name];
-        }
+
         socket.write("GET ${uri.path} HTTP/1.1\n");
         if (host != null) {
           socket.write("Host: $host\n");
