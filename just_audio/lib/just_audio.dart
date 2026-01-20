@@ -689,7 +689,7 @@ class AudioPlayer {
       if (!_disposed) {
         _positionSubject!.addStream(createPositionStream(
             steps: 800,
-            minPeriod: const Duration(milliseconds: 50)  // Optimized: 20fps max is sufficient for seek bar,
+            minPeriod: const Duration(milliseconds: 50), // Optimized: 20fps max is sufficient for seek bar
             maxPeriod: const Duration(milliseconds: 200)));
       }
     }
