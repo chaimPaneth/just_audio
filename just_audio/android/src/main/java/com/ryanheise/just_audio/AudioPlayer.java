@@ -124,13 +124,13 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
             }
             switch (player.getPlaybackState()) {
             case Player.STATE_BUFFERING:
-                handler.postDelayed(this, 200);
+                handler.postDelayed(this, 300);  // Optimized: reduced frequency for low-end devices
                 break;
             case Player.STATE_READY:
                 if (player.getPlayWhenReady()) {
-                    handler.postDelayed(this, 500);
+                    handler.postDelayed(this, 750);  // Optimized: reduced frequency for low-end devices
                 } else {
-                    handler.postDelayed(this, 1000);
+                    handler.postDelayed(this, 1500);  // Optimized: reduced frequency for low-end devices
                 }
                 break;
             default:
