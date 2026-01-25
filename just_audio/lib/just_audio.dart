@@ -689,7 +689,9 @@ class AudioPlayer {
       if (!_disposed) {
         _positionSubject!.addStream(createPositionStream(
             steps: 800,
-            minPeriod: const Duration(milliseconds: 50), // Optimized: 20fps max is sufficient for seek bar
+            minPeriod: const Duration(
+                milliseconds:
+                    50), // Optimized: 20fps max is sufficient for seek bar
             maxPeriod: const Duration(milliseconds: 200)));
       }
     }
@@ -882,6 +884,7 @@ class AudioPlayer {
       initialPosition: initialPosition,
       shuffleOrder: shuffleOrder ?? DefaultShuffleOrder(),
     );
+
     await _playlist._init(audioSources, loadRequest.shuffleOrder);
     loadRequest.checkInterruption();
     Duration? duration;
@@ -1001,6 +1004,7 @@ class AudioPlayer {
       source._shuffle(initialIndex: initialSeekValues?.index ?? 0);
       await _broadcastSequence();
       checkInterruption();
+
       _loadFuture = platform
           .load(LoadRequest(
             audioSourceMessage: source._toMessage(),
@@ -1085,32 +1089,48 @@ class AudioPlayer {
         updateTime: DateTime.now(),
       ),
     ));
+
+    // Run all the heavy work in a fire-and-forget async block
+    // This prevents blocking the UI thread
+    _playAsync();
+  }
+
+  /// Internal async play implementation that runs in background
+  Future<void> _playAsync() async {
     final playCompleter = Completer<dynamic>();
-    final audioSession = await AudioSession.instance;
-    if (!_handleAudioSessionActivation || await audioSession.setActive(true)) {
-      if (!playing) return;
-      // TODO: rewrite this to more cleanly handle simultaneous load/play
-      // requests which each may result in platform play requests.
-      final requireActive = _playlist.children.isNotEmpty;
-      if (requireActive) {
-        if (_active) {
-          // If the native platform is already active, send it a play request.
-          // NOTE: If a load() request happens simultaneously, this may result
-          // in two play requests being sent. The platform implementation should
-          // ignore the second play request since it is already playing.
-          _sendPlayRequest(await _platform, playCompleter);
-        } else {
-          // If the native platform wasn't already active, activating it will
-          // implicitly restore the playing state and send a play request.
-          _setPlatformActive(true, playCompleter: playCompleter)
-              ?.catchError((dynamic e) async => null);
+
+    try {
+      final audioSession = await AudioSession.instance;
+      if (!_handleAudioSessionActivation ||
+          await audioSession.setActive(true)) {
+        if (!playing) return;
+        // TODO: rewrite this to more cleanly handle simultaneous load/play
+        // requests which each may result in platform play requests.
+        final requireActive = _playlist.children.isNotEmpty;
+        if (requireActive) {
+          if (_active) {
+            // If the native platform is already active, send it a play request.
+            // NOTE: If a load() request happens simultaneously, this may result
+            // in two play requests being sent. The platform implementation should
+            // ignore the second play request since it is already playing.
+            _sendPlayRequest(await _platform, playCompleter);
+          } else {
+            // If the native platform wasn't already active, activating it will
+            // implicitly restore the playing state and send a play request.
+            _setPlatformActive(true, playCompleter: playCompleter)
+                ?.catchError((dynamic e) async => null);
+          }
         }
+      } else {
+        // Revert if we fail to activate the audio session.
+        _playerEventSubject.add(playerEvent.copyWith(playing: false));
       }
-    } else {
-      // Revert if we fail to activate the audio session.
+
+      // Fire-and-forget: handle completion/errors in background
+      playCompleter.future.catchError((e) {});
+    } catch (e) {
       _playerEventSubject.add(playerEvent.copyWith(playing: false));
     }
-    await playCompleter.future;
   }
 
   /// Pauses the currently playing media. This method does nothing if
@@ -1317,8 +1337,10 @@ class AudioPlayer {
               PositionDiscontinuityReason.seek,
               prevPlaybackEvent,
               playbackEvent));
+
           await (await _platform)
               .seek(SeekRequest(position: position, index: index));
+
           if (playing && !_active) {
             _setPlatformActive(true)?.catchError((dynamic e) async => null);
           }
@@ -1465,7 +1487,9 @@ class AudioPlayer {
   Future<Duration?>? _setPlatformActive(bool active,
       {Completer<void>? playCompleter, bool force = false}) {
     if (_disposed) return null;
-    if (!force && (active == _active)) return _loadFuture;
+    if (!force && (active == _active)) {
+      return _loadFuture;
+    }
     _platformLoading = active;
 
     // Warning! Tricky async code lies ahead.
@@ -1605,6 +1629,7 @@ class AudioPlayer {
       }
 
       final platform = await _lock.synchronized(() async {
+
         final oldPlatform = _platformValue;
         // Strangely, this throws "Cannot complete a future with itself" when
         // _playbackEventSubscription==null under flutter test.
@@ -1648,7 +1673,6 @@ class AudioPlayer {
                 errorCode: playbackEvent.errorCode,
                 errorMessage: playbackEvent.errorMessage,
               ));
-
         _platformValue = platform;
         return platform;
       });
@@ -3153,11 +3177,11 @@ class ConcatenatingAudioSource extends AudioSource {
   /// Initialise without communicating with platform.
   Future<void> _init(List<AudioSource> children, ShuffleOrder shuffleOrder) {
     return _lock.synchronized(() async {
+      final player = _player;
       this.children.replaceRange(0, this.children.length, children);
       _shuffleOrder = shuffleOrder;
       _shuffleOrder.clear();
       _shuffleOrder.insert(0, children.length);
-      final player = _player;
       if (player != null) {
         for (var child in children) {
           child._onAttach(player);
