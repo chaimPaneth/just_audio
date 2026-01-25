@@ -7,6 +7,7 @@ import android.media.audiofx.LoudnessEnhancer;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import androidx.media3.common.C;
 import androidx.media3.exoplayer.DefaultLivePlaybackSpeedControl;
@@ -107,6 +108,9 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
     private ExoPlayer player;
     private Integer audioSessionId;
     private Integer errorCode;
+    // Background thread for heavy operations to prevent UI jank
+    private HandlerThread backgroundThread;
+    private Handler backgroundHandler;
     private String errorMessage;
     private Integer currentIndex;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -157,6 +161,10 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         eventChannel = new BetterEventChannel(messenger, "com.ryanheise.just_audio.events." + id);
         dataEventChannel = new BetterEventChannel(messenger, "com.ryanheise.just_audio.data." + id);
         processingState = ProcessingState.idle;
+        // Initialize background thread for heavy operations (prevents UI jank)
+        backgroundThread = new HandlerThread("AudioPlayerBackground", android.os.Process.THREAD_PRIORITY_AUDIO);
+        backgroundThread.start();
+        backgroundHandler = new Handler(backgroundThread.getLooper());
         if (audioLoadConfiguration != null) {
             Map<?, ?> loadControlMap = (Map<?, ?>)audioLoadConfiguration.get("androidLoadControl");
             if (loadControlMap != null) {
@@ -722,7 +730,9 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         }
         DefaultHttpDataSource.Factory httpDataSourceFactory = new DefaultHttpDataSource.Factory()
             .setUserAgent(userAgent)
-            .setAllowCrossProtocolRedirects(true);
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(5000)  // Reduced from 8s default - faster failure detection
+            .setReadTimeoutMs(5000);   // Reduced from 8s default
         if (stringHeaders != null && stringHeaders.size() > 0) {
             httpDataSourceFactory.setDefaultRequestProperties(stringHeaders);
         }
@@ -1044,6 +1054,12 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
     }
 
     public void dispose() {
+        // Clean up background thread
+        if (backgroundThread != null) {
+            backgroundThread.quitSafely();
+            backgroundThread = null;
+            backgroundHandler = null;
+        }
         if (processingState == ProcessingState.loading) {
             abortExistingConnection(true);
         }
