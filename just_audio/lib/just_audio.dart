@@ -1194,7 +1194,20 @@ class AudioPlayer {
   Future<void> warmUp() async {
     if (_disposed) return;
     if (!Platform.isAndroid) return; // Only needed for Android ExoPlayer
-    await (await _platform).warmUp(WarmUpRequest());
+    
+    // If the native platform isn't active yet, we need to activate it.
+    // _setPlatformActive(true) will create the ExoPlayer instance.
+    if (!_active) {
+      await _setPlatformActive(true);
+    }
+    
+    // Now the platform is active, call warmUp to ensure it's ready.
+    // The native side's ensurePlayerInitialized() will have already run
+    // via _pluginPlatform.init(), but we call warmUp for good measure.
+    final platform = _platformValue;
+    if (platform != null && platform is! _IdleAudioPlayer) {
+      await platform.warmUp(WarmUpRequest());
+    }
   }
 
   /// Sets the volume of this player, where 1.0 is normal volume.
