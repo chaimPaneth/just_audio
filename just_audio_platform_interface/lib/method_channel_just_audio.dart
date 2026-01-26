@@ -72,6 +72,13 @@ class MethodChannelAudioPlayer extends AudioPlayerPlatform {
   }
 
   @override
+  @override
+  Future<WarmUpResponse> warmUp(WarmUpRequest request) async {
+    return WarmUpResponse.fromMap((await _channel
+        .invokeMethod<Map<dynamic, dynamic>>('warmUp', request.toMap()))!);
+  }
+
+  @override
   Future<SetVolumeResponse> setVolume(SetVolumeRequest request) async {
     return SetVolumeResponse.fromMap((await _channel
         .invokeMethod<Map<dynamic, dynamic>>('setVolume', request.toMap()))!);

@@ -1186,6 +1186,17 @@ class AudioPlayer {
     await future;
   }
 
+  /// Pre-initializes the native audio player without loading any audio.
+  /// On Android, this triggers ExoPlayer creation and codec initialization,
+  /// which can take several seconds on low-end devices. Call this early
+  /// (e.g., during splash screen) to ensure the player is ready when the
+  /// user wants to play audio. Has no effect on iOS/web.
+  Future<void> warmUp() async {
+    if (_disposed) return;
+    if (!Platform.isAndroid) return; // Only needed for Android ExoPlayer
+    await (await _platform).warmUp(WarmUpRequest());
+  }
+
   /// Sets the volume of this player, where 1.0 is normal volume.
   Future<void> setVolume(final double volume) async {
     if (_disposed) return;

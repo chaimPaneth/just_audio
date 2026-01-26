@@ -441,6 +441,10 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
                 pause();
                 result.success(new HashMap<String, Object>());
                 break;
+            case "warmUp":
+                // Just return success - ensurePlayerInitialized() was already called at start of onMethodCall
+                result.success(new HashMap<String, Object>());
+                break;
             case "setVolume":
                 setVolume((float) ((double) ((Double) call.argument("volume"))));
                 result.success(new HashMap<String, Object>());

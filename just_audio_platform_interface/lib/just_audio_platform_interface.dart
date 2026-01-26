@@ -92,6 +92,11 @@ abstract class AudioPlayerPlatform {
   }
 
   /// Changes the volume.
+  /// Pre-initializes the native audio player.
+  Future<WarmUpResponse> warmUp(WarmUpRequest request) {
+    throw UnimplementedError("warmUp() has not been implemented.");
+  }
+
   Future<SetVolumeResponse> setVolume(SetVolumeRequest request) {
     throw UnimplementedError("setVolume() has not been implemented.");
   }
@@ -546,6 +551,19 @@ class SetVolumeRequest {
 class SetVolumeResponse {
   static SetVolumeResponse fromMap(Map<dynamic, dynamic> map) =>
       SetVolumeResponse();
+}
+
+/// Request to pre-initialize the native audio player.
+class WarmUpRequest {
+  WarmUpRequest();
+
+  Map<dynamic, dynamic> toMap() => <dynamic, dynamic>{};
+}
+
+/// Response from pre-initializing the native audio player.
+class WarmUpResponse {
+  static WarmUpResponse fromMap(Map<dynamic, dynamic> map) =>
+      WarmUpResponse();
 }
 
 /// Information communicated to the platform implementation when setting the
