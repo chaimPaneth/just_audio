@@ -66,6 +66,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -91,7 +92,7 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
     private Result prepareResult;
     private Result playResult;
     private Result seekResult;
-    private Map<String, MediaSource> mediaSources = new HashMap<String, MediaSource>();
+    private Map<String, MediaSource> mediaSources = new ConcurrentHashMap<String, MediaSource>();
     private IcyInfo icyInfo;
     private IcyHeaders icyHeaders;
     private AudioAttributes pendingAudioAttributes;
