@@ -689,7 +689,9 @@ class AudioPlayer {
       if (!_disposed) {
         _positionSubject!.addStream(createPositionStream(
             steps: 800,
-            minPeriod: const Duration(milliseconds: 50), // Optimized: 20fps max is sufficient for seek bar
+            minPeriod: const Duration(
+                milliseconds:
+                    50), // Optimized: 20fps max is sufficient for seek bar
             maxPeriod: const Duration(milliseconds: 200)));
       }
     }
@@ -908,15 +910,24 @@ class AudioPlayer {
     final pluginLoadRequest = _pluginLoadRequest;
     if (_playlist.children.isEmpty) return null;
     if (_active) {
-      return await _load(
-        await _platform,
-        _playlist,
-        initialSeekValues: pluginLoadRequest?.initialSeekValues,
-      );
-    } else {
-      // This will implicitly load the current audio source.
-      return await _setPlatformActive(true);
+      // OPTIMIZED: Use _platformValue if available to avoid waiting for the
+      // full _platform future which includes _load() and blocks until buffering.
+      final platform = _platformValue;
+      if (platform != null) {
+        // Platform already initialized - call _load directly
+        return await _load(
+          platform,
+          _playlist,
+          initialSeekValues: pluginLoadRequest?.initialSeekValues,
+        );
+      }
+      // Platform not yet initialized - fall through to activate it
     }
+    // This will implicitly load the current audio source.
+    // OPTIMIZED: Don't await the full result - just trigger the load and return
+    // The caller can listen to processingStateStream for ready state
+    _setPlatformActive(true)?.catchError((dynamic e) async => null);
+    return null; // Duration unknown until loaded
   }
 
   /// Adds [audioSource] to the end of the playlist.
@@ -982,6 +993,8 @@ class AudioPlayer {
     ConcatenatingAudioSource source, {
     _InitialSeekValues? initialSeekValues,
   }) async {
+    final _loadPerfStart = DateTime.now().millisecondsSinceEpoch;
+    // ignore: avoid_print
     final pluginLoadRequest = _pluginLoadRequest;
     final activationNumber = _activationCount;
     void checkInterruption() {
@@ -1014,9 +1027,12 @@ class AudioPlayer {
         // the platform has changed since we started loading, so abort.
         throw PlayerInterruptedException('Loading interrupted');
       }
-      // Wait for loading state to pass.
-      await processingStateStream
-          .firstWhere((state) => state != ProcessingState.loading);
+      // OPTIMIZED: Don't wait for loading state to pass - this was blocking for 15+ seconds!
+      // The audio will start playing when buffered enough (ExoPlayer handles this).
+      // Callers who need to know when ready can listen to processingStateStream themselves.
+      // OLD CODE (blocking):
+      // await processingStateStream
+      //     .firstWhere((state) => state != ProcessingState.loading);
       checkInterruption();
       _pluginLoadRequest = null;
       return duration;
@@ -1072,8 +1088,12 @@ class AudioPlayer {
   /// This method activates the audio session before playback, and will do
   /// nothing if activation of the audio session fails for any reason.
   Future<void> play() async {
-    if (_disposed) return;
-    if (playing) return;
+    if (_disposed) {
+      return;
+    }
+    if (playing) {
+      return;
+    }
     _playInterrupted = false;
     // Broadcast to clients immediately, but revert to false if we fail to
     // activate the audio session. This allows setAudioSource to be aware of a
@@ -1098,7 +1118,12 @@ class AudioPlayer {
           // NOTE: If a load() request happens simultaneously, this may result
           // in two play requests being sent. The platform implementation should
           // ignore the second play request since it is already playing.
-          _sendPlayRequest(await _platform, playCompleter);
+          // OPTIMIZED: Use _platformValue directly if available to avoid waiting
+          // for _load() to complete. The _platform future includes _load() which
+          // waits for buffering, but _platformValue is set immediately after
+          // platform initialization.
+          final platform = _platformValue ?? await _platform;
+          _sendPlayRequest(platform, playCompleter);
         } else {
           // If the native platform wasn't already active, activating it will
           // implicitly restore the playing state and send a play request.
@@ -1139,7 +1164,9 @@ class AudioPlayer {
   Future<void> _sendPlayRequest(
       AudioPlayerPlatform platform, Completer<void>? playCompleter) async {
     try {
-      if (!playing) return; // defensive
+      if (!playing) {
+        return;
+      }
       await platform.play(PlayRequest());
       playCompleter?.complete();
     } catch (e, stackTrace) {
@@ -1174,13 +1201,13 @@ class AudioPlayer {
   Future<void> warmUp() async {
     if (_disposed) return;
     if (!Platform.isAndroid) return; // Only needed for Android ExoPlayer
-    
+
     // If the native platform isn't active yet, we need to activate it.
     // _setPlatformActive(true) will create the ExoPlayer instance.
     if (!_active) {
       await _setPlatformActive(true);
     }
-    
+
     // Now the platform is active, call warmUp to ensure it's ready.
     // The native side's ensurePlayerInitialized() will have already run
     // via _pluginPlatform.init(), but we call warmUp for good measure.
@@ -1761,6 +1788,7 @@ class AudioPlayer {
         }
       }
 
+      // ignore: avoid_print
       subscribeToEvents(platform);
 
       try {
@@ -2973,9 +3001,8 @@ class ConcatenatingAudioSource extends AudioSource {
   @override
   Future<void> _onLoad() async {
     await super._onLoad();
-    for (var source in children) {
-      await source._onLoad();
-    }
+    // OPTIMIZED: Load all children in parallel instead of sequentially
+    await Future.wait(children.map((source) => source._onLoad()));
   }
 
   @override

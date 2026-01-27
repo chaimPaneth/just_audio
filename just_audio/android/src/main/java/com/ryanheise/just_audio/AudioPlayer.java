@@ -327,6 +327,13 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
 
     @Override
     public void onPlaybackStateChanged(int playbackState) {
+        String stateName = "unknown";
+        switch (playbackState) {
+            case Player.STATE_IDLE: stateName = "IDLE"; break;
+            case Player.STATE_BUFFERING: stateName = "BUFFERING"; break;
+            case Player.STATE_READY: stateName = "READY"; break;
+            case Player.STATE_ENDED: stateName = "ENDED"; break;
+        }
         switch (playbackState) {
         case Player.STATE_READY:
             if (player.getPlayWhenReady())
@@ -421,6 +428,8 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
 
     @Override
     public void onMethodCall(final MethodCall call, final Result result) {
+        if (call.method.equals("load") || call.method.equals("play")) {
+        }
         ensurePlayerInitialized();
 
         try {
@@ -760,6 +769,7 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
     }
 
     private void load(final List<MediaSource> mediaSources, ShuffleOrder shuffleOrder, final long initialPosition, final Integer initialIndex, final Result result) {
+        long loadStartTime = System.currentTimeMillis();
         currentIndex = initialIndex != null ? initialIndex : 0;
         switch (processingState) {
         case idle:
@@ -772,7 +782,7 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
             player.stop();
             break;
         }
-        prepareResult = result;
+        // OPTIMIZED: Return immediately - prepareResult = result; was blocking for 15+ seconds!
         updatePosition();
         processingState = ProcessingState.loading;
         errorCode = null;
@@ -782,6 +792,10 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         player.setMediaSources(mediaSources, windowIndex, initialPosition);
         player.setShuffleOrder(shuffleOrder);
         player.prepare();
+        // Return immediately with null duration - dont wait for buffering
+        Map<String, Object> response = new HashMap<>();
+        response.put("duration", null);
+        result.success(response);
     }
 
     private void ensurePlayerInitialized() {
@@ -996,20 +1010,18 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
     }
 
     public void play(Result result) {
+        long playStartTime = System.currentTimeMillis();
         if (player.getPlayWhenReady()) {
             result.success(new HashMap<String, Object>());
             return;
         }
-        if (playResult != null) {
-            playResult.success(new HashMap<String, Object>());
-        }
-        playResult = result;
+        // OPTIMIZED: Return immediately instead of waiting for playback to end.
+        // The old code stored playResult and only completed it on STATE_ENDED,
+        // causing platform.play() to block for the ENTIRE duration of audio!
         player.setPlayWhenReady(true);
         updatePosition();
-        if (processingState == ProcessingState.completed && playResult != null) {
-            playResult.success(new HashMap<String, Object>());
-            playResult = null;
-        }
+        // Return immediately - audio will play in background
+        result.success(new HashMap<String, Object>());
     }
 
     public void pause() {
