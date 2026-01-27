@@ -743,7 +743,8 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         return new DefaultDataSource.Factory(context, httpDataSourceFactory);
     }
 
-    private void load(final List<MediaSource> mediaSources, ShuffleOrder shuffleOrder, final long initialPosition, final Integer initialIndex, final Result result) {
+    private void load(final List<MediaSource> mediaSources, final ShuffleOrder shuffleOrder, final long initialPosition, final Integer initialIndex, final Result result) {
+        // Update state immediately on main thread for responsiveness
         currentIndex = initialIndex != null ? initialIndex : 0;
         switch (processingState) {
         case idle:
@@ -762,10 +763,14 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         errorCode = null;
         errorMessage = null;
         enqueuePlaybackEvent();
-        int windowIndex = initialIndex != null ? initialIndex : 0;
-        player.setMediaSources(mediaSources, windowIndex, initialPosition);
-        player.setShuffleOrder(shuffleOrder);
-        player.prepare();
+        
+        // Run heavy ExoPlayer operations on background thread to prevent UI jank
+        final int windowIndex = initialIndex != null ? initialIndex : 0;
+        backgroundHandler.post(() -> {
+            player.setMediaSources(mediaSources, windowIndex, initialPosition);
+            player.setShuffleOrder(shuffleOrder);
+            player.prepare();
+        });
     }
 
     private void ensurePlayerInitialized() {
