@@ -425,14 +425,27 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         try {
             switch (call.method) {
             case "load":
-                Long initialPosition = getLong(call.argument("initialPosition"));
-                Integer initialIndex = call.argument("initialIndex");
-                Map<?, ?> audioSourceMap = call.argument("audioSource");
-                MediaSource[] children = getAudioSourcesArray(audioSourceMap.get("children"));
-                ShuffleOrder shuffleOrder = decodeShuffleOrder(mapGet(audioSourceMap, "shuffleOrder"));
-                load(Arrays.asList(children), shuffleOrder,
-                        initialPosition == null ? C.TIME_UNSET : initialPosition / 1000,
-                        initialIndex, result);
+                final Long initialPosition = getLong(call.argument("initialPosition"));
+                final Integer initialIndex = call.argument("initialIndex");
+                final Map<?, ?> audioSourceMap = call.argument("audioSource");
+                final Object childrenObj = audioSourceMap.get("children");
+                final Object shuffleOrderObj = mapGet(audioSourceMap, "shuffleOrder");
+                backgroundHandler.post(() -> {
+                    try {
+                        final MediaSource[] children = getAudioSourcesArray(childrenObj);
+                        final ShuffleOrder shuffleOrder = decodeShuffleOrder(shuffleOrderObj);
+                        new Handler(Looper.getMainLooper()).post(() -> {
+                            load(Arrays.asList(children), shuffleOrder,
+                                    initialPosition == null ? C.TIME_UNSET : initialPosition / 1000,
+                                    initialIndex, result);
+                        });
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                        new Handler(Looper.getMainLooper()).post(() -> {
+                            result.error("LoadError", "Error loading audio sources: " + e.getMessage(), null);
+                        });
+                    }
+                });
                 break;
             case "play":
                 play(result);
@@ -594,12 +607,14 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
     private MediaSource getAudioSource(final Object json) {
         Map<?, ?> map = (Map<?, ?>)json;
         String id = (String)map.get("id");
-        MediaSource mediaSource = mediaSources.get(id);
-        if (mediaSource == null) {
-            mediaSource = decodeAudioSource(map);
-            mediaSources.put(id, mediaSource);
+        synchronized (mediaSources) {
+            MediaSource mediaSource = mediaSources.get(id);
+            if (mediaSource == null) {
+                mediaSource = decodeAudioSource(map);
+                mediaSources.put(id, mediaSource);
+            }
+            return mediaSource;
         }
-        return mediaSource;
     }
 
     private DefaultExtractorsFactory buildExtractorsFactory(Map<?, ?> options) {
@@ -1074,7 +1089,9 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
             playResult.success(new HashMap<String, Object>());
             playResult = null;
         }
-        mediaSources.clear();
+        synchronized (mediaSources) {
+            mediaSources.clear();
+        }
         clearAudioEffects();
         if (player != null) {
             player.release();
