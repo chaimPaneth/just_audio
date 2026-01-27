@@ -434,7 +434,7 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
                 backgroundHandler.post(() -> {
                     try {
                         final MediaSource[] children = getAudioSourcesArray(childrenObj);
-                        final ShuffleOrder shuffleOrder = decodeShuffleOrder((List<Integer>) shuffleOrderObj);
+                        @SuppressWarnings("unchecked") final ShuffleOrder shuffleOrder = decodeShuffleOrder((List<Integer>) shuffleOrderObj);
                         new Handler(Looper.getMainLooper()).post(() -> {
                             load(Arrays.asList(children), shuffleOrder,
                                     initialPosition == null ? C.TIME_UNSET : initialPosition / 1000,
