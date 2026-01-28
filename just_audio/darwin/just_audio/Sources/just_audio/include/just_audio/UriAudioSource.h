@@ -9,8 +9,9 @@
 
 @interface UriAudioSource : IndexedAudioSource
 
-@property (readonly, nonatomic) NSString *uri;
+@property (readwrite, nonatomic) NSString *uri;
 
 - (instancetype)initWithId:(NSString *)sid uri:(NSString *)uri loadControl:(LoadControl *)loadControl headers:(NSDictionary *)headers options:(NSDictionary *)options;
+- (void)updateUri:(NSString *)newUri;
 
 @end

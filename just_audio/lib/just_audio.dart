@@ -8,6 +8,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio_platform_interface/just_audio_platform_interface.dart';
+import 'package:just_audio_platform_interface/method_channel_just_audio.dart';
 import 'package:meta/meta.dart' show experimental;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -987,6 +988,37 @@ class AudioPlayer {
     _audioSources[source._id] = source;
   }
 
+  /// Sets up the URL refresh callback for handling 401/403 errors from native code
+  void _setupUrlRefreshCallback(AudioPlayerPlatform platform) {
+    // Check if platform supports URL refresh callback (MethodChannelAudioPlayer)
+    if (platform is! MethodChannelAudioPlayer) return;
+    
+    platform.onUrlRefreshRequest = (String sourceId, int httpStatusCode, int currentPosition) async {
+      // Find the audio source by ID
+      final source = _audioSources[sourceId];
+      if (source == null) {
+        print('just_audio: Cannot find source with ID $sourceId for URL refresh');
+        return null;
+      }
+      
+      // Check if the source has an onUrlRefresh callback
+      if (source.onUrlRefresh == null) {
+        print('just_audio: Source $sourceId does not have onUrlRefresh callback');
+        return null;
+      }
+      
+      try {
+        // Call the onUrlRefresh callback to get a new URL
+        final newUri = await source.onUrlRefresh!();
+        print('just_audio: Got new URL from onUrlRefresh callback');
+        return {'url': newUri.toString()};
+      } catch (e) {
+        print('just_audio: Error calling onUrlRefresh: $e');
+        return null;
+      }
+    };
+  }
+
   Future<Duration?> _load(
     AudioPlayerPlatform platform,
     // ignore: deprecated_member_use_from_same_package
@@ -1640,6 +1672,9 @@ class AudioPlayer {
           _setPlatformActive(false)?.catchError((dynamic e) async => null);
         }
       }, onError: (Object e, [StackTrace? st]) {});
+      
+      // Set up URL refresh callback for handling 401/403 errors from native code
+      _setupUrlRefreshCallback(platform);
     }
 
     Future<AudioPlayerPlatform> setPlatform() async {

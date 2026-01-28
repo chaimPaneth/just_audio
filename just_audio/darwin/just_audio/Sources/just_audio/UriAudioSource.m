@@ -211,4 +211,14 @@
     return kCMTimeInvalid;
 }
 
+- (void)updateUri:(NSString *)newUri {
+    _uri = newUri;
+    // Create new player items with the new URL
+    _playerItem = [self createPlayerItem:newUri];
+    if (_playerItem2) {
+        _playerItem2 = [self createPlayerItem:newUri];
+        _playerItem2.audioSource = _playerItem.audioSource;
+    }
+}
+
 @end
