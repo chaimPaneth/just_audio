@@ -2689,7 +2689,7 @@ abstract class AudioSource {
 
   AudioSource(
       {String? id, this.onError, this.onUrlRefresh, this.getAuthHeaders})
-      : _id = _uuid.v4();
+      : _id = id ?? _uuid.v4();
 
   @mustCallSuper
   void _onAttach(AudioPlayer player) {
