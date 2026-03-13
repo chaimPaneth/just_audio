@@ -992,8 +992,144 @@
 }
 
 - (void)sendErrorForItem:(IndexedPlayerItem *)playerItem {
+    // Check for HTTP 401/403 errors that might need URL refresh
+    NSError *error = playerItem.error;
+    if (error != nil) {
+        NSError *underlyingError = error.userInfo[NSUnderlyingErrorKey];
+        if (underlyingError != nil) {
+            // Check for HTTP status code in the underlying error
+            NSNumber *statusCode = underlyingError.userInfo[@"_kCFStreamErrorCodeKey"];
+            if (statusCode == nil) {
+                // Also check for NSURLErrorFailingURLPeerTrustErrorKey or status code directly
+                statusCode = underlyingError.userInfo[@"NSLocalizedDescription"];
+                // Check the HTTP response status code from AVPlayerItem's error logs
+                NSHTTPURLResponse *response = underlyingError.userInfo[@"NSErrorFailingURLStringKey"];
+            }
+        }
+        // Check if the error message contains 401 or 403 (as fallback)
+        NSString *errorMessage = error.localizedDescription;
+        BOOL is401Or403 = NO;
+        
+        // AVFoundation HTTP errors typically have code -1022 (NSURLErrorResourceUnavailable) or similar
+        // We also check the underlying error's userInfo for status codes
+        if (underlyingError != nil) {
+            NSDictionary *userInfo = underlyingError.userInfo;
+            NSNumber *httpStatusCode = userInfo[@"_kCFHTTPStreamErrorHTTPStatusCodeKey"];
+            if (httpStatusCode == nil) {
+                // Try getting it from NSHTTPURLResponse if available
+                NSHTTPURLResponse *httpResponse = userInfo[@"NSErrorFailingURLPeerTrustErrorKey"];
+                if ([httpResponse isKindOfClass:[NSHTTPURLResponse class]]) {
+                    httpStatusCode = @(httpResponse.statusCode);
+                }
+            }
+            if (httpStatusCode != nil) {
+                int code = [httpStatusCode intValue];
+                if (code == 401 || code == 403) {
+                    is401Or403 = YES;
+                    NSLog(@"just_audio: HTTP %d error detected, requesting URL refresh", code);
+                    [self requestUrlRefreshWithStatusCode:code playerItem:playerItem];
+                    return;
+                }
+            }
+        }
+        
+        // Fallback: check error message for common 403/401 patterns
+        if (!is401Or403 && errorMessage != nil) {
+            if ([errorMessage containsString:@"403"] || [errorMessage containsString:@"Forbidden"] ||
+                [errorMessage containsString:@"401"] || [errorMessage containsString:@"Unauthorized"]) {
+                is401Or403 = YES;
+                int code = [errorMessage containsString:@"401"] ? 401 : 403;
+                NSLog(@"just_audio: HTTP %d error detected from message, requesting URL refresh", code);
+                [self requestUrlRefreshWithStatusCode:code playerItem:playerItem];
+                return;
+            }
+        }
+    }
+    
     [self sendError:@((int)playerItem.error.code) errorMessage:playerItem.error.localizedDescription playerItem:playerItem switchToIdle:YES];
     [_player removeAllItems];
+}
+
+- (void)requestUrlRefreshWithStatusCode:(int)httpStatusCode playerItem:(IndexedPlayerItem *)playerItem {
+    // Get source ID from the player item
+    NSString *sourceId = nil;
+    long currentPosition = 0;
+    
+    int itemIndex = [self indexForItem:playerItem];
+    if (itemIndex >= 0 && itemIndex < _indexedAudioSources.count) {
+        IndexedAudioSource *source = _indexedAudioSources[itemIndex];
+        if ([source isKindOfClass:NSClassFromString(@"UriAudioSource")]) {
+            sourceId = source.sourceId;
+        }
+    }
+    currentPosition = (long)(CMTimeGetSeconds(_player.currentTime) * 1000000); // microseconds
+    
+    if (sourceId != nil) {
+        NSDictionary *args = @{
+            @"sourceId": sourceId,
+            @"httpStatusCode": @(httpStatusCode),
+            @"currentPosition": @(currentPosition)
+        };
+        
+        __weak typeof(self) weakSelf = self;
+        [_methodChannel invokeMethod:@"requestUrlRefresh" arguments:args result:^(id result) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf == nil) return;
+            
+            if (result != nil && [result isKindOfClass:[NSDictionary class]]) {
+                NSDictionary *response = (NSDictionary *)result;
+                NSString *newUrl = response[@"url"];
+                if (newUrl != nil && newUrl.length > 0) {
+                    NSLog(@"just_audio: Received new URL, retrying playback");
+                    [strongSelf retryWithNewUrl:newUrl sourceId:sourceId position:currentPosition];
+                } else {
+                    NSLog(@"just_audio: No new URL provided, reporting error");
+                    [strongSelf sendError:@(httpStatusCode) errorMessage:@"Unauthorized - no refresh URL provided" playerItem:playerItem switchToIdle:YES];
+                    [strongSelf->_player removeAllItems];
+                }
+            } else if ([result isKindOfClass:[FlutterError class]]) {
+                FlutterError *flutterError = (FlutterError *)result;
+                NSLog(@"just_audio: URL refresh failed: %@", flutterError.message);
+                [strongSelf sendError:@(httpStatusCode) errorMessage:flutterError.message playerItem:playerItem switchToIdle:YES];
+                [strongSelf->_player removeAllItems];
+            } else {
+                [strongSelf sendError:@(httpStatusCode) errorMessage:@"Unauthorized - refresh failed" playerItem:playerItem switchToIdle:YES];
+                [strongSelf->_player removeAllItems];
+            }
+        }];
+    } else {
+        NSLog(@"just_audio: Cannot request URL refresh - no source ID");
+        [self sendError:@(httpStatusCode) errorMessage:@"Unauthorized" playerItem:playerItem switchToIdle:YES];
+        [_player removeAllItems];
+    }
+}
+
+- (void)retryWithNewUrl:(NSString *)newUrl sourceId:(NSString *)sourceId position:(long)position {
+    // Find and update the source, then retry
+    for (int i = 0; i < _indexedAudioSources.count; i++) {
+        IndexedAudioSource *source = _indexedAudioSources[i];
+        if ([source.sourceId isEqualToString:sourceId]) {
+            if ([source isKindOfClass:NSClassFromString(@"UriAudioSource")]) {
+                // Update the URL in the source
+                UriAudioSource *uriSource = (UriAudioSource *)source;
+                [uriSource updateUri:newUrl];
+                
+                // Re-prepare the player with the new URL
+                _errorCode = (NSNumber *)[NSNull null];
+                _errorMessage = (NSString *)[NSNull null];
+                
+                // Seek to position and play
+                CMTime seekTime = CMTimeMakeWithSeconds(position / 1000000.0, NSEC_PER_SEC);
+                [_player seekToTime:seekTime completionHandler:^(BOOL finished) {
+                    if (_playing) {
+                        [_player play];
+                    }
+                }];
+                return;
+            }
+        }
+    }
+    NSLog(@"just_audio: Could not find source to retry with new URL");
 }
 
 - (void)sendError:(NSNumber *)errorCode errorMessage:(NSString *)errorMessage playerItem:(IndexedPlayerItem *)playerItem switchToIdle:(BOOL)switchToIdle {

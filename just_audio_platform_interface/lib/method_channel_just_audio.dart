@@ -34,10 +34,35 @@ class MethodChannelJustAudio extends JustAudioPlatform {
 /// An implementation of [AudioPlayerPlatform] that uses method channels.
 class MethodChannelAudioPlayer extends AudioPlayerPlatform {
   final MethodChannel _channel;
+  
+  /// Callback for handling URL refresh requests from native code
+  Future<Map<String, dynamic>?> Function(String sourceId, int httpStatusCode, int currentPosition)? onUrlRefreshRequest;
 
   MethodChannelAudioPlayer(String id)
       : _channel = MethodChannel('com.ryanheise.just_audio.methods.$id'),
-        super(id);
+        super(id) {
+    // Set up method call handler for native -> Dart calls
+    _channel.setMethodCallHandler(_handleMethodCall);
+  }
+  
+  Future<dynamic> _handleMethodCall(MethodCall call) async {
+    switch (call.method) {
+      case 'requestUrlRefresh':
+        if (onUrlRefreshRequest != null) {
+          final args = call.arguments as Map<dynamic, dynamic>;
+          final sourceId = args['sourceId'] as String;
+          final httpStatusCode = args['httpStatusCode'] as int;
+          final currentPosition = (args['currentPosition'] as num).toInt();
+          return await onUrlRefreshRequest!(sourceId, httpStatusCode, currentPosition);
+        }
+        return null;
+      default:
+        throw PlatformException(
+          code: 'Unimplemented',
+          message: 'Method ${call.method} not implemented',
+        );
+    }
+  }
 
   @override
   Stream<PlaybackEventMessage> get playbackEventMessageStream =>

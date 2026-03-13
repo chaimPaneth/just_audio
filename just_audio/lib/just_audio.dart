@@ -8,6 +8,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio_platform_interface/just_audio_platform_interface.dart';
+import 'package:just_audio_platform_interface/method_channel_just_audio.dart';
 import 'package:meta/meta.dart' show experimental;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -984,6 +985,37 @@ class AudioPlayer {
     _audioSources[source._id] = source;
   }
 
+  /// Sets up the URL refresh callback for handling 401/403 errors from native code
+  void _setupUrlRefreshCallback(AudioPlayerPlatform platform) {
+    // Check if platform supports URL refresh callback (MethodChannelAudioPlayer)
+    if (platform is! MethodChannelAudioPlayer) return;
+    
+    platform.onUrlRefreshRequest = (String sourceId, int httpStatusCode, int currentPosition) async {
+      // Find the audio source by ID
+      final source = _audioSources[sourceId];
+      if (source == null) {
+        print('just_audio: Cannot find source with ID $sourceId for URL refresh');
+        return null;
+      }
+      
+      // Check if the source has an onUrlRefresh callback
+      if (source.onUrlRefresh == null) {
+        print('just_audio: Source $sourceId does not have onUrlRefresh callback');
+        return null;
+      }
+      
+      try {
+        // Call the onUrlRefresh callback to get a new URL
+        final newUri = await source.onUrlRefresh!();
+        print('just_audio: Got new URL from onUrlRefresh callback');
+        return {'url': newUri.toString()};
+      } catch (e) {
+        print('just_audio: Error calling onUrlRefresh: $e');
+        return null;
+      }
+    };
+  }
+
   Future<Duration?> _load(
     AudioPlayerPlatform platform,
     // ignore: deprecated_member_use_from_same_package
@@ -1597,6 +1629,9 @@ class AudioPlayer {
           _setPlatformActive(false)?.catchError((dynamic e) async => null);
         }
       }, onError: (Object e, [StackTrace? st]) {});
+      
+      // Set up URL refresh callback for handling 401/403 errors from native code
+      _setupUrlRefreshCallback(platform);
     }
 
     Future<AudioPlayerPlatform> setPlatform() async {
@@ -2476,6 +2511,8 @@ class _ProxyHttpServer {
   Uri addUriAudioSource(UriAudioSource source) {
     final uri = source.uri;
     final headers = <String, String>{};
+    final onError = source.onError;
+    final getAuthHeaders = source.getAuthHeaders;
     if (source.headers != null) {
       headers.addAll(source.headers!.cast<String, String>());
     }
@@ -2484,6 +2521,8 @@ class _ProxyHttpServer {
       uri,
       headers: headers,
       userAgent: source._player?._userAgent,
+      onError: onError,
+      getAuthHeaders: getAuthHeaders,
     );
     return uri.replace(
       scheme: 'http',
@@ -2599,6 +2638,14 @@ abstract class AudioSource {
   final String _id;
   AudioPlayer? _player;
 
+  final void Function(String message)? onError;
+
+  /// Callback to refresh the URL when the token expires.
+  final Future<Uri> Function()? onUrlRefresh;
+
+  /// Getter function for additional headers to auth
+  final Future<Map<String, String>> Function()? getAuthHeaders;
+
   /// Creates an [AudioSource] from a [Uri] with optional headers by
   /// attempting to guess the type of stream. On iOS, this uses Apple's SDK to
   /// automatically detect the stream type. On Android, the type of stream will
@@ -2621,8 +2668,14 @@ abstract class AudioSource {
   /// provided by that package. If you wish to have more control over the tag
   /// for background audio purposes, consider using the plugin audio_service
   /// instead of just_audio_background.
-  static UriAudioSource uri(Uri uri,
-      {Map<String, String>? headers, dynamic tag}) {
+  static UriAudioSource uri(
+    Uri uri, {
+    Map<String, String>? headers,
+    dynamic tag,
+    void Function(String message)? onError,
+    Future<Map<String, String>> Function()? getAuthHeaders,
+    Future<Uri> Function()? onUrlRefresh,
+  }) {
     bool hasExtension(Uri uri, String extension) =>
         uri.path.toLowerCase().endsWith('.$extension') ||
         uri.fragment.toLowerCase().endsWith('.$extension');
@@ -2631,7 +2684,12 @@ abstract class AudioSource {
     } else if (hasExtension(uri, 'm3u8')) {
       return HlsAudioSource(uri, headers: headers, tag: tag);
     } else {
-      return ProgressiveAudioSource(uri, headers: headers, tag: tag);
+      return ProgressiveAudioSource(uri,
+          headers: headers,
+          tag: tag,
+          onError: onError,
+          getAuthHeaders: getAuthHeaders,
+          onUrlRefresh: onUrlRefresh);
     }
   }
 
@@ -2663,7 +2721,9 @@ abstract class AudioSource {
     return AudioSource.uri(Uri.parse('asset:///$keyName'), tag: tag);
   }
 
-  AudioSource({String? id}) : _id = id ?? _uuid.v4();
+  AudioSource(
+      {String? id, this.onError, this.onUrlRefresh, this.getAuthHeaders})
+      : _id = _uuid.v4();
 
   @mustCallSuper
   void _onAttach(AudioPlayer player) {
@@ -2705,7 +2765,12 @@ abstract class IndexedAudioSource extends AudioSource {
   final dynamic tag;
   Duration? duration;
 
-  IndexedAudioSource({this.tag, this.duration});
+  IndexedAudioSource(
+      {this.tag,
+      this.duration,
+      super.onError,
+      super.getAuthHeaders,
+      super.onUrlRefresh});
 
   @override
   void _shuffle({int? initialIndex}) {}
@@ -2723,8 +2788,15 @@ abstract class UriAudioSource extends IndexedAudioSource {
   final Map<String, String>? headers;
   Uri? _overrideUri;
 
-  UriAudioSource(this.uri, {this.headers, dynamic tag, Duration? duration})
-      : super(tag: tag, duration: duration);
+  UriAudioSource(
+    this.uri, {
+    this.headers,
+    dynamic tag,
+    Duration? duration,
+    super.onError,
+    super.getAuthHeaders,
+    super.onUrlRefresh,
+  }) : super(tag: tag, duration: duration);
 
   /// If [uri] points to an asset, this gives us [_overrideUri] which is the URI
   /// of the copied asset on the filesystem, otherwise it gives us the original
@@ -2824,6 +2896,9 @@ class ProgressiveAudioSource extends UriAudioSource {
     super.tag,
     super.duration,
     this.options,
+    super.onError,
+    super.getAuthHeaders,
+    super.onUrlRefresh,
   });
 
   @override
@@ -2935,6 +3010,8 @@ class ConcatenatingAudioSource extends AudioSource {
     required this.children,
     this.useLazyPreparation = true,
     ShuffleOrder? shuffleOrder,
+    super.getAuthHeaders,
+    super.onUrlRefresh,
   }) : _shuffleOrder = shuffleOrder ?? DefaultShuffleOrder()
           ..insert(0, children.length);
 
@@ -3812,27 +3889,44 @@ _ProxyHandler _proxyHandlerForUri(
   Uri uri, {
   Map<String, String>? headers,
   String? userAgent,
+  void Function(String message)? onError,
+  Future<Map<String, String>> Function()? getAuthHeaders,
 }) {
-  // Keep redirected [Uri] to speed-up requests
   Uri? redirectedUri;
+
   Future<void> handler(_ProxyHttpServer server, HttpRequest request) async {
     final client = _createHttpClient(userAgent: userAgent);
-    // Try to make normal request
     String? host;
+
     try {
       final requestHeaders = <String, String>{};
       request.headers
           .forEach((name, value) => requestHeaders[name] = value.join(', '));
-      // write supplied headers last (to ensure supplied headers aren't overwritten)
       headers?.forEach((name, value) => requestHeaders[name] = value);
-      final originRequest =
+      if (getAuthHeaders != null) {
+        final authHeaders = await getAuthHeaders();
+        authHeaders.forEach((name, value) => requestHeaders[name] = value);
+      }
+      var originRequest =
           await _getUrl(client, redirectedUri ?? uri, headers: requestHeaders);
       host = originRequest.headers.value(HttpHeaders.hostHeader);
-      final originResponse = await originRequest.close();
+      var originResponse = await originRequest.close();
       if (originResponse.redirects.isNotEmpty) {
         redirectedUri = originResponse.redirects.last.location;
       }
-
+      if (originResponse.statusCode == HttpStatus.unauthorized) {
+        if (getAuthHeaders != null) {
+          final authHeaders = await getAuthHeaders();
+          authHeaders.forEach((name, value) => requestHeaders[name] = value);
+        }
+        originRequest = await _getUrl(client, redirectedUri ?? uri,
+            headers: requestHeaders);
+        host = originRequest.headers.value(HttpHeaders.hostHeader);
+        originResponse = await originRequest.close();
+        if (originResponse.redirects.isNotEmpty) {
+          redirectedUri = originResponse.redirects.last.location;
+        }
+      }
       request.response.headers.clear();
       originResponse.headers.forEach((name, value) {
         final filteredValue = value
@@ -3842,12 +3936,9 @@ _ProxyHandler _proxyHandlerForUri(
       });
       request.response.statusCode = originResponse.statusCode;
 
-      // Send response
       if (headers != null && request.uri.path.toLowerCase().endsWith('.m3u8') ||
           ['application/x-mpegURL', 'application/vnd.apple.mpegurl']
               .contains(request.headers.value(HttpHeaders.contentTypeHeader))) {
-        // If this is an m3u8 file with headers, prepare the nested URIs.
-        // TODO: Handle other playlist formats similarly?
         final m3u8 = await originResponse.transform(utf8.decoder).join();
         for (var line in const LineSplitter().convert(m3u8)) {
           line = line.replaceAllMapped(
@@ -3857,10 +3948,8 @@ _ProxyHandler _proxyHandlerForUri(
           try {
             final rawNestedUri = Uri.parse(line);
             if (rawNestedUri.hasScheme) {
-              // Don't propagate headers
               server.addUriAudioSource(AudioSource.uri(rawNestedUri));
             } else {
-              // This is a resource on the same server, so propagate the headers.
               final basePath = rawNestedUri.path.startsWith('/')
                   ? ''
                   : uri.path.replaceAll(RegExp(r'/[^/]*$'), '/');
@@ -3869,32 +3958,22 @@ _ProxyHandler _proxyHandlerForUri(
               server.addUriAudioSource(
                   AudioSource.uri(nestedUri, headers: headers));
             }
-          } catch (e) {
+          } catch (_) {
             // ignore malformed lines
           }
         }
         request.response.add(utf8.encode(m3u8));
       } else {
-        request.response.bufferOutput = false;
-        var done = false;
-        request.response.done.then((dynamic _) => done = true);
-        await for (var chunk in originResponse) {
-          if (done) break;
-          request.response.add(chunk);
-          await request.response.flush();
-        }
+        await originResponse.pipe(request.response);
+        await request.response.close();
       }
-      await request.response.flush();
-      await request.response.close();
     } on HttpException {
-      // We likely are dealing with a streaming protocol
       if (uri.scheme == 'http') {
-        // Try parsing HTTP 0.9 response
-        //request.response.headers.clear();
         final socket = await Socket.connect(uri.host, uri.port);
         final clientSocket =
             await request.response.detachSocket(writeHeaders: false);
         final done = Completer<dynamic>();
+
         socket.listen(
           clientSocket.add,
           onDone: () async {
@@ -3904,16 +3983,14 @@ _ProxyHandler _proxyHandlerForUri(
             done.complete();
           },
         );
-        // Rewrite headers
+
         final headers = <String, String?>{};
         request.headers.forEach((name, value) {
           if (name.toLowerCase() != HttpHeaders.hostHeader) {
             headers[name] = value.join(",");
           }
         });
-        for (var name in headers.keys) {
-          headers[name] = headers[name];
-        }
+
         socket.write("GET ${uri.path} HTTP/1.1\n");
         if (host != null) {
           socket.write("Host: $host\n");

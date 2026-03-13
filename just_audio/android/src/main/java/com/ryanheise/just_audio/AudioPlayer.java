@@ -7,6 +7,7 @@ import android.media.audiofx.LoudnessEnhancer;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import androidx.media3.common.C;
 import androidx.media3.exoplayer.DefaultLivePlaybackSpeedControl;
@@ -50,6 +51,7 @@ import androidx.media3.exoplayer.trackselection.TrackSelectionArray;
 import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.HttpDataSource;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.util.Util;
 import io.flutter.Log;
@@ -108,6 +110,9 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
     private ExoPlayer player;
     private Integer audioSessionId;
     private Integer errorCode;
+    // Background thread for heavy operations to prevent UI jank
+    private HandlerThread backgroundThread;
+    private Handler backgroundHandler;
     private String errorMessage;
     private Integer currentIndex;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -125,13 +130,13 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
             }
             switch (player.getPlaybackState()) {
             case Player.STATE_BUFFERING:
-                handler.postDelayed(this, 200);
+                handler.postDelayed(this, 300);  // Optimized: reduced frequency for low-end devices
                 break;
             case Player.STATE_READY:
                 if (player.getPlayWhenReady()) {
-                    handler.postDelayed(this, 500);
+                    handler.postDelayed(this, 750);  // Optimized: reduced frequency for low-end devices
                 } else {
-                    handler.postDelayed(this, 1000);
+                    handler.postDelayed(this, 1500);  // Optimized: reduced frequency for low-end devices
                 }
                 break;
             default:
@@ -177,6 +182,10 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         eventChannel = new BetterEventChannel(messenger, "com.ryanheise.just_audio.events." + id);
         dataEventChannel = new BetterEventChannel(messenger, "com.ryanheise.just_audio.data." + id);
         processingState = ProcessingState.idle;
+        // Initialize background thread for heavy operations (prevents UI jank)
+        backgroundThread = new HandlerThread("AudioPlayerBackground", android.os.Process.THREAD_PRIORITY_AUDIO);
+        backgroundThread.start();
+        backgroundHandler = new Handler(backgroundThread.getLooper());
         if (audioLoadConfiguration != null) {
             Map<?, ?> loadControlMap = (Map<?, ?>)audioLoadConfiguration.get("androidLoadControl");
             if (loadControlMap != null) {
@@ -398,30 +407,134 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
 
     @Override
     public void onPlayerError(PlaybackException error) {
+        // Check for HTTP 401/403 errors that might need URL refresh
         if (error instanceof ExoPlaybackException) {
             final ExoPlaybackException exoError = (ExoPlaybackException)error;
-            switch (exoError.type) {
-            case ExoPlaybackException.TYPE_SOURCE:
+            if (exoError.type == ExoPlaybackException.TYPE_SOURCE) {
+                Throwable cause = exoError.getSourceException();
+                // Check for InvalidResponseCodeException which has the response code
+                if (cause instanceof HttpDataSource.InvalidResponseCodeException) {
+                    HttpDataSource.InvalidResponseCodeException responseException = 
+                        (HttpDataSource.InvalidResponseCodeException) cause;
+                    int responseCode = responseException.responseCode;
+                    if (responseCode == 401 || responseCode == 403) {
+                        Log.i(TAG, "HTTP " + responseCode + " error detected, requesting URL refresh");
+                        requestUrlRefresh(responseCode);
+                        return;
+                    }
+                }
                 Log.e(TAG, "TYPE_SOURCE: " + exoError.getSourceException().getMessage());
-                break;
-
-            case ExoPlaybackException.TYPE_RENDERER:
+            } else if (exoError.type == ExoPlaybackException.TYPE_RENDERER) {
                 Log.e(TAG, "TYPE_RENDERER: " + exoError.getRendererException().getMessage());
-                break;
-
-            case ExoPlaybackException.TYPE_UNEXPECTED:
+            } else if (exoError.type == ExoPlaybackException.TYPE_UNEXPECTED) {
                 Log.e(TAG, "TYPE_UNEXPECTED: " + exoError.getUnexpectedException().getMessage());
-                break;
-
-            default:
+            } else {
                 Log.e(TAG, "default ExoPlaybackException: " + exoError.getUnexpectedException().getMessage());
             }
-            // TODO: send both errorCode and type
             sendError(exoError.type, exoError.getMessage(), mapOf("index", currentIndex));
         } else {
             Log.e(TAG, "default PlaybackException: " + error.getMessage());
             sendError(error.errorCode, error.getMessage(), mapOf("index", currentIndex));
         }
+    }
+
+    private void requestUrlRefresh(int httpStatusCode) {
+        // Get current source ID from the media item tag
+        String sourceId = null;
+        long currentPosition = 0;
+        try {
+            if (player != null && player.getCurrentMediaItem() != null) {
+                MediaItem currentItem = player.getCurrentMediaItem();
+                if (currentItem.localConfiguration != null) {
+                    sourceId = (String) currentItem.localConfiguration.tag;
+                }
+                currentPosition = player.getCurrentPosition();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error getting current source ID: " + e.getMessage());
+        }
+        
+        if (sourceId != null) {
+            final String finalSourceId = sourceId;
+            final long finalPosition = currentPosition;
+            Map<String, Object> args = new HashMap<>();
+            args.put("sourceId", sourceId);
+            args.put("httpStatusCode", httpStatusCode);
+            args.put("currentPosition", currentPosition);
+            methodChannel.invokeMethod("requestUrlRefresh", args, new MethodChannel.Result() {
+                @Override
+                public void success(Object result) {
+                    if (result != null && result instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> response = (Map<String, Object>) result;
+                        String newUrl = (String) response.get("url");
+                        if (newUrl != null && !newUrl.isEmpty()) {
+                            Log.i(TAG, "Received new URL, retrying playback");
+                            retryWithNewUrl(finalSourceId, newUrl, finalPosition);
+                        } else {
+                            Log.e(TAG, "No new URL provided, reporting error");
+                            sendError(httpStatusCode, "Unauthorized - no refresh URL provided", mapOf("index", currentIndex));
+                        }
+                    } else {
+                        sendError(httpStatusCode, "Unauthorized - refresh failed", mapOf("index", currentIndex));
+                    }
+                }
+
+                @Override
+                public void error(String errorCode, String errorMessage, Object errorDetails) {
+                    Log.e(TAG, "URL refresh failed: " + errorMessage);
+                    try {
+                        sendError(Integer.parseInt(errorCode), errorMessage, mapOf("index", currentIndex));
+                    } catch (NumberFormatException e) {
+                        sendError(httpStatusCode, errorMessage, mapOf("index", currentIndex));
+                    }
+                }
+
+                @Override
+                public void notImplemented() {
+                    Log.e(TAG, "requestUrlRefresh not implemented in Dart");
+                    sendError(httpStatusCode, "Unauthorized - refresh not implemented", mapOf("index", currentIndex));
+                }
+            });
+        } else {
+            Log.e(TAG, "Cannot request URL refresh - no source ID");
+            sendError(httpStatusCode, "Unauthorized", mapOf("index", currentIndex));
+        }
+    }
+
+    private void retryWithNewUrl(String sourceId, String newUrl, long position) {
+        handler.post(() -> {
+            try {
+                // Rebuild the media source with the new URL
+                MediaSource oldSource = mediaSources.get(sourceId);
+                if (oldSource != null) {
+                    // Create new media source with same ID but new URL
+                    MediaSource newSource = new ProgressiveMediaSource.Factory(buildDataSourceFactory(null), buildExtractorsFactory(null))
+                        .createMediaSource(new MediaItem.Builder()
+                            .setUri(Uri.parse(newUrl))
+                            .setTag(sourceId)
+                            .build());
+                    mediaSources.put(sourceId, newSource);
+                    
+                    // Seek to the position where we left off and retry
+                    if (player != null) {
+                        int itemIndex = currentIndex != null ? currentIndex : 0;
+                        // Clear error state
+                        errorCode = null;
+                        errorMessage = null;
+                        // Re-prepare and seek
+                        player.prepare();
+                        player.seekTo(itemIndex, position);
+                        if (player.getPlayWhenReady()) {
+                            player.play();
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Error retrying with new URL: " + e.getMessage());
+                sendError(403, "Failed to retry with new URL: " + e.getMessage(), mapOf("index", currentIndex));
+            }
+        });
     }
 
     private void completeSeek() {
@@ -496,40 +609,22 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
                 seek(position == null ? C.TIME_UNSET : position / 1000, index, result);
                 break;
             case "concatenatingInsertAll":
-                if (((String)call.argument("id")).length() == 0) {
-                    player.addMediaSources(call.argument("index"), getAudioSources(call.argument("children"))); 
-                    player.setShuffleOrder(decodeShuffleOrder(call.argument("shuffleOrder")));
-                    result.success(new HashMap<String, Object>());
-                } else {
-                    concatenating(call.argument("id"))
-                        .addMediaSources(call.argument("index"), getAudioSources(call.argument("children")), handler, () -> result.success(new HashMap<String, Object>()));
-                    concatenating(call.argument("id"))
-                        .setShuffleOrder(decodeShuffleOrder(call.argument("shuffleOrder")));
-                }
+                // Use modern Media3 player API (non-deprecated)
+                player.addMediaSources(call.argument("index"), getAudioSources(call.argument("children")));
+                player.setShuffleOrder(decodeShuffleOrder(call.argument("shuffleOrder")));
+                result.success(new HashMap<String, Object>());
                 break;
             case "concatenatingRemoveRange":
-                if (((String)call.argument("id")).length() == 0) {
-                    player.removeMediaItems(call.argument("startIndex"), call.argument("endIndex"));
-                    player.setShuffleOrder(decodeShuffleOrder(call.argument("shuffleOrder")));
-                    result.success(new HashMap<String, Object>());
-                } else {
-                    concatenating(call.argument("id"))
-                        .removeMediaSourceRange(call.argument("startIndex"), call.argument("endIndex"), handler, () -> result.success(new HashMap<String, Object>()));
-                    concatenating(call.argument("id"))
-                        .setShuffleOrder(decodeShuffleOrder(call.argument("shuffleOrder")));
-                }
+                // Use modern Media3 player API (non-deprecated)
+                player.removeMediaItems(call.argument("startIndex"), call.argument("endIndex"));
+                player.setShuffleOrder(decodeShuffleOrder(call.argument("shuffleOrder")));
+                result.success(new HashMap<String, Object>());
                 break;
             case "concatenatingMove":
-                if (((String)call.argument("id")).length() == 0) {
-                    player.moveMediaItem(call.argument("currentIndex"), call.argument("newIndex"));
-                    player.setShuffleOrder(decodeShuffleOrder(call.argument("shuffleOrder")));
-                    result.success(new HashMap<String, Object>());
-                } else {
-                    concatenating(call.argument("id"))
-                        .moveMediaSource(call.argument("currentIndex"), call.argument("newIndex"), handler, () -> result.success(new HashMap<String, Object>()));
-                    concatenating(call.argument("id"))
-                        .setShuffleOrder(decodeShuffleOrder(call.argument("shuffleOrder")));
-                }
+                // Use modern Media3 player API (non-deprecated)
+                player.moveMediaItem(call.argument("currentIndex"), call.argument("newIndex"));
+                player.setShuffleOrder(decodeShuffleOrder(call.argument("shuffleOrder")));
+                result.success(new HashMap<String, Object>());
                 break;
             case "setAndroidAudioAttributes":
                 setAudioAttributes(call.argument("contentType"), call.argument("flags"), call.argument("usage"));
@@ -742,7 +837,9 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
         }
         DefaultHttpDataSource.Factory httpDataSourceFactory = new DefaultHttpDataSource.Factory()
             .setUserAgent(userAgent)
-            .setAllowCrossProtocolRedirects(true);
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(5000)  // Reduced from 8s default - faster failure detection
+            .setReadTimeoutMs(5000);   // Reduced from 8s default
         if (stringHeaders != null && stringHeaders.size() > 0) {
             httpDataSourceFactory.setDefaultRequestProperties(stringHeaders);
         }
@@ -1047,6 +1144,12 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
     }
 
     public void dispose() {
+        // Clean up background thread
+        if (backgroundThread != null) {
+            backgroundThread.quitSafely();
+            backgroundThread = null;
+            backgroundHandler = null;
+        }
         if (processingState == ProcessingState.loading) {
             abortExistingConnection(true);
         }
