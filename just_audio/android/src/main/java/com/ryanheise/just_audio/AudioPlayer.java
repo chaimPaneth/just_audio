@@ -30,6 +30,8 @@ import androidx.media3.common.AudioAttributes;
 import androidx.media3.exoplayer.NoSampleRenderer;
 import androidx.media3.exoplayer.Renderer;
 import androidx.media3.exoplayer.RenderersFactory;
+import androidx.media3.exoplayer.mediacodec.MediaCodecInfo;
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector;
 import androidx.media3.extractor.DefaultExtractorsFactory;
 import androidx.media3.common.Metadata;
 import androidx.media3.exoplayer.metadata.MetadataOutput;
@@ -874,7 +876,31 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
     private void ensurePlayerInitialized() {
         if (player == null) {
             RenderersFactory renderersFactory = (eventHandler, videoListener, audioListener, textOutput, metadataOutput) -> {
-                Renderer[] defaultRenderers = new DefaultRenderersFactory(context)
+                DefaultRenderersFactory factory = new DefaultRenderersFactory(context);
+                // Prefer FFmpeg/extension decoders over hardware MediaCodec.
+                // If FFmpeg native libs are present, they take priority.
+                // Otherwise falls back to software MediaCodec decoders,
+                // bypassing buggy hardware codecs on MediaTek (Wave) devices.
+                factory.setExtensionRendererMode(
+                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER);
+                factory.setMediaCodecSelector((mimeType, requiresSecureDecoder, requiresTunnelingDecoder) -> {
+                    List<MediaCodecInfo> allCodecs = MediaCodecSelector.DEFAULT
+                        .getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder);
+                    // Prefer software codecs over hardware to avoid MTK codec bugs
+                    List<MediaCodecInfo> softwareCodecs = new ArrayList<>();
+                    List<MediaCodecInfo> hardwareCodecs = new ArrayList<>();
+                    for (MediaCodecInfo codec : allCodecs) {
+                        if (codec.softwareOnly) {
+                            softwareCodecs.add(codec);
+                        } else {
+                            hardwareCodecs.add(codec);
+                        }
+                    }
+                    // Software first, hardware as fallback
+                    softwareCodecs.addAll(hardwareCodecs);
+                    return softwareCodecs.isEmpty() ? allCodecs : softwareCodecs;
+                });
+                Renderer[] defaultRenderers = factory
                     .createRenderers(eventHandler, videoListener, audioListener, textOutput, metadataOutput);
                 Renderer[] allRenderers = Arrays.copyOf(defaultRenderers, defaultRenderers.length + 1);
                 allRenderers[defaultRenderers.length] = new ObserverRenderer();
